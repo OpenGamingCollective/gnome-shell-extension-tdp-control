@@ -1,0 +1,9 @@
+{
+  "uuid": "tdp-control@opengamingcollective.org",
+  "name": "TDP Control",
+  "description": "Adds a quick settings toggle for performance profiles, TDP limit and manual GPU clock, backed by steamos-manager (steamosctl).",
+  "shell-version": ["48", "49", "50"],
+  "session-modes": ["user", "unlock-dialog"],
+  "url": "https://github.com/OpenGamingCollective/gnome-shell-extension-tdp-control",
+  "version": 1
+}

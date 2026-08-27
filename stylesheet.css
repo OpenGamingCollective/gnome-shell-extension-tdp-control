@@ -1,0 +1,12 @@
+.tdp-control-slider-item {
+  spacing: 8px;
+}
+
+.tdp-control-slider-item StBoxLayout {
+  spacing: 6px;
+}
+
+.tdp-control-slider-item .tdp-control-value {
+  font-feature-settings: "tnum";
+  font-weight: bold;
+}
