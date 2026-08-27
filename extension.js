@@ -1,6 +1,6 @@
 /*
  * A quick settings entry for steamos-manager's performance profile, TDP limit
- * and manual GPU clock, mirroring how Steam presents them:
+ * and manual GPU clock, mirroring how Steam presents them
  */
 
 import Atk from 'gi://Atk';
