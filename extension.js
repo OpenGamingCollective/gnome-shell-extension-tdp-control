@@ -393,7 +393,7 @@ class TdpToggle extends QuickMenuToggle {
             this._syncingGpuSwitch = false;
 
             if (client.gpuManual) {
-                this._gpuItem.sync(client.gpuClock,
+                this._gpuItem.sync(client.gpuClockTarget,
                     client.gpuClockMin, client.gpuClockMax);
             }
         }

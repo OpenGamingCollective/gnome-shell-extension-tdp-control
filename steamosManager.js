@@ -25,6 +25,9 @@ export const GPU_IFACE = 'com.steampowered.SteamOSManager1.GpuPerformanceLevel1'
 export const GPU_LEVEL_MANUAL = 'manual';
 export const GPU_LEVEL_AUTO = 'auto';
 
+// How long to keep showing a value we asked for before believing the daemon.
+const CONFIRM_TIMEOUT_MS = 2000;
+
 const ROOT_PATH = '/';
 const PROPS_IFACE = 'org.freedesktop.DBus.Properties';
 const OM_IFACE = 'org.freedesktop.DBus.ObjectManager';
@@ -40,6 +43,7 @@ export const SteamOSManagerClient = GObject.registerClass({
         this._connection = Gio.DBus.session;
         this._cancellable = new Gio.Cancellable();
         this._signalIds = [];
+        this._pending = {};
 
         this._clearState();
 
@@ -52,6 +56,8 @@ export const SteamOSManagerClient = GObject.registerClass({
     }
 
     _clearState() {
+        this._clearPending();
+
         this.available = false;
         this.hasProfiles = false;
         this.hasTdp = false;
@@ -67,6 +73,9 @@ export const SteamOSManagerClient = GObject.registerClass({
         this.gpuClock = 0;
         this.gpuClockMin = 0;
         this.gpuClockMax = 0;
+        this._gpuClockKnown = false;
+        this._rememberedGpuClock = 0;
+        this._gpuClockToProgram = 0;
     }
 
     get canSetGpuClock() {
@@ -77,6 +86,16 @@ export const SteamOSManagerClient = GObject.registerClass({
 
     get gpuManual() {
         return this.gpuLevel === GPU_LEVEL_MANUAL;
+    }
+
+    get gpuClockTarget() {
+        if (this._gpuClockKnown)
+            return this.gpuClock;
+        if (this._rememberedGpuClock > 0) {
+            return Math.clamp(this._rememberedGpuClock,
+                this.gpuClockMin, this.gpuClockMax);
+        }
+        return this.gpuClockMax;
     }
 
     _onNameAppeared() {
@@ -185,7 +204,7 @@ export const SteamOSManagerClient = GObject.registerClass({
                 this.suggestedProfile = props.SuggestedDefaultPerformanceProfile;
         } else if (iface === TDP_IFACE) {
             if ('TdpLimit' in props)
-                this.tdp = props.TdpLimit;
+                this.tdp = this._settle('tdp', props.TdpLimit);
             if ('TdpLimitMin' in props)
                 this.tdpMin = props.TdpLimitMin;
             if ('TdpLimitMax' in props)
@@ -193,15 +212,29 @@ export const SteamOSManagerClient = GObject.registerClass({
         } else if (iface === GPU_IFACE) {
             if ('AvailableGpuPerformanceLevels' in props)
                 this.gpuLevels = props.AvailableGpuPerformanceLevels;
-            if ('GpuPerformanceLevel' in props)
-                this.gpuLevel = props.GpuPerformanceLevel;
+            if ('GpuPerformanceLevel' in props) {
+                const previous = this.gpuLevel;
+                this.gpuLevel = this._settle('gpuLevel',
+                    props.GpuPerformanceLevel);
+                this._updateGpuClockKnown(previous);
+                this._programGpuClock();
+            }
             if ('ManualGpuClock' in props)
-                this.gpuClock = props.ManualGpuClock;
+                this.gpuClock = this._settle('gpuClock', props.ManualGpuClock);
             if ('ManualGpuClockMin' in props)
                 this.gpuClockMin = props.ManualGpuClockMin;
             if ('ManualGpuClockMax' in props)
                 this.gpuClockMax = props.ManualGpuClockMax;
         }
+    }
+
+    _updateGpuClockKnown(previousLevel) {
+        if (this.gpuLevel !== GPU_LEVEL_MANUAL)
+            this._gpuClockKnown = false;
+        else if (previousLevel === null)
+            this._gpuClockKnown = true;
+        else if (previousLevel !== GPU_LEVEL_MANUAL)
+            this._gpuClockKnown = false;
     }
 
     _refreshGpuClock() {
@@ -219,10 +252,11 @@ export const SteamOSManagerClient = GObject.registerClass({
                     return;
                 }
 
-                if (clock === this.gpuClock)
+                const settled = this._settle('gpuClock', clock);
+                if (settled === this.gpuClock)
                     return;
 
-                this.gpuClock = clock;
+                this.gpuClock = settled;
                 this.emit('changed');
             });
     }
@@ -233,18 +267,102 @@ export const SteamOSManagerClient = GObject.registerClass({
     }
 
     setTdp(watts) {
+        this.tdp = watts;
+        this._expect('tdp', watts, value => (this.tdp = value));
         this._setProperty(TDP_IFACE, 'TdpLimit',
             new GLib.Variant('u', watts));
+        this.emit('changed');
     }
 
     setGpuLevel(level) {
+        const previous = this.gpuLevel;
+
+        this._gpuClockToProgram = level === GPU_LEVEL_MANUAL &&
+            previous !== GPU_LEVEL_MANUAL ? this.gpuClockTarget : 0;
+
+        this.gpuLevel = level;
+        this._expect('gpuLevel', level, value => {
+            const stale = this.gpuLevel;
+            this.gpuLevel = value;
+            this._updateGpuClockKnown(stale);
+            this._programGpuClock();
+        });
+        this._updateGpuClockKnown(previous);
         this._setProperty(GPU_IFACE, 'GpuPerformanceLevel',
             new GLib.Variant('s', level));
+        this.emit('changed');
+    }
+
+    _programGpuClock() {
+        const clock = this._gpuClockToProgram;
+        if (clock === 0)
+            return;
+
+        this._gpuClockToProgram = 0;
+        if (this.gpuLevel === GPU_LEVEL_MANUAL)
+            this.setGpuClock(clock);
     }
 
     setGpuClock(megahertz) {
+        this.gpuClock = megahertz;
+        this._rememberedGpuClock = megahertz;
+        this._gpuClockKnown = true;
+        this._expect('gpuClock', megahertz, value => (this.gpuClock = value));
         this._setProperty(GPU_IFACE, 'ManualGpuClock',
             new GLib.Variant('u', megahertz));
+        this.emit('changed');
+    }
+
+    // Record a value we just wrote. Until the daemon reports it back
+    _expect(key, value, apply) {
+        this._cancelPending(key);
+        this._pending[key] = {
+            value,
+            apply,
+            reported: undefined,
+            id: GLib.timeout_add(GLib.PRIORITY_DEFAULT, CONFIRM_TIMEOUT_MS,
+                () => this._onPendingTimeout(key)),
+        };
+    }
+
+    _settle(key, reported) {
+        const pending = this._pending[key];
+        if (!pending)
+            return reported;
+
+        if (reported !== pending.value) {
+            pending.reported = reported;
+            return pending.value;
+        }
+
+        this._cancelPending(key);
+        return reported;
+    }
+
+    _onPendingTimeout(key) {
+        const pending = this._pending[key];
+        this._pending[key] = null;
+
+        if (pending?.reported !== undefined)
+            pending.apply(pending.reported);
+
+        this.emit('changed');
+        return GLib.SOURCE_REMOVE;
+    }
+
+    _cancelPending(key) {
+        const pending = this._pending[key];
+        if (!pending)
+            return;
+
+        GLib.source_remove(pending.id);
+        this._pending[key] = null;
+    }
+
+    _clearPending() {
+        for (const key of Object.keys(this._pending))
+            this._cancelPending(key);
+        this._pending = {};
     }
 
     _setProperty(iface, name, value) {
@@ -270,6 +388,7 @@ export const SteamOSManagerClient = GObject.registerClass({
     destroy() {
         this._cancellable.cancel();
         this._unsubscribe();
+        this._clearPending();
 
         if (this._nameWatchId) {
             Gio.bus_unwatch_name(this._nameWatchId);
