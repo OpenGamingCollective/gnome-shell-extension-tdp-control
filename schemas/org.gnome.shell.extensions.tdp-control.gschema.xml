@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.tdp-control"
+          path="/org/gnome/shell/extensions/tdp-control/">
+    <key name="tdp-enabled" type="b">
+      <default>false</default>
+      <summary>Manual TDP limit</summary>
+      <description>
+        Whether the TDP limit is enabled.
+      </description>
+    </key>
+    <key name="tdp-limit" type="u">
+      <default>0</default>
+      <summary>TDP limit in watts</summary>
+      <description>
+        The limit to restore when manual TDP is switched on. Zero is always the maximum.
+      </description>
+    </key>
+  </schema>
+</schemalist>

@@ -37,9 +37,10 @@ export const SteamOSManagerClient = GObject.registerClass({
         'changed': {},
     },
 }, class SteamOSManagerClient extends GObject.Object {
-    _init() {
+    _init(settings) {
         super._init();
 
+        this._settings = settings;
         this._connection = Gio.DBus.session;
         this._cancellable = new Gio.Cancellable();
         this._signalIds = [];
@@ -68,6 +69,9 @@ export const SteamOSManagerClient = GObject.registerClass({
         this.tdp = 0;
         this.tdpMin = 0;
         this.tdpMax = 0;
+        this.tdpEnabled = this._settings.get_boolean('tdp-enabled');
+        this._rememberedTdp = this._settings.get_uint('tdp-limit');
+        this._tdpRestored = false;
         this.gpuLevels = [];
         this.gpuLevel = null;
         this.gpuClock = 0;
@@ -76,6 +80,17 @@ export const SteamOSManagerClient = GObject.registerClass({
         this._gpuClockKnown = false;
         this._rememberedGpuClock = 0;
         this._gpuClockToProgram = 0;
+    }
+
+    get canSetTdp() {
+        return this.hasTdp && this.tdpMax > this.tdpMin;
+    }
+
+    // The limit to restore when TDP control is switched back on
+    get tdpTarget() {
+        if (this._rememberedTdp > 0)
+            return Math.clamp(this._rememberedTdp, this.tdpMin, this.tdpMax);
+        return this.tdpMax;
     }
 
     get canSetGpuClock() {
@@ -163,8 +178,10 @@ export const SteamOSManagerClient = GObject.registerClass({
                 const [objectPath, interfaces] = params.recursiveUnpack();
                 if (objectPath !== OBJECT_PATH)
                     return;
-                if (interfaces.includes(TDP_IFACE))
+                if (interfaces.includes(TDP_IFACE)) {
                     this.hasTdp = false;
+                    this._tdpRestored = false;
+                }
                 if (interfaces.includes(PROFILE_IFACE))
                     this.hasProfiles = false;
                 if (interfaces.includes(GPU_IFACE))
@@ -187,6 +204,7 @@ export const SteamOSManagerClient = GObject.registerClass({
         if (TDP_IFACE in interfaces) {
             this.hasTdp = true;
             this._applyProperties(TDP_IFACE, interfaces[TDP_IFACE]);
+            this._restoreTdp();
         }
         if (GPU_IFACE in interfaces) {
             this.hasGpu = true;
@@ -203,12 +221,15 @@ export const SteamOSManagerClient = GObject.registerClass({
             if ('SuggestedDefaultPerformanceProfile' in props)
                 this.suggestedProfile = props.SuggestedDefaultPerformanceProfile;
         } else if (iface === TDP_IFACE) {
-            if ('TdpLimit' in props)
-                this.tdp = this._settle('tdp', props.TdpLimit);
+            // The bounds have to land before the limit is judged against them
             if ('TdpLimitMin' in props)
                 this.tdpMin = props.TdpLimitMin;
             if ('TdpLimitMax' in props)
                 this.tdpMax = props.TdpLimitMax;
+            if ('TdpLimit' in props) {
+                const ours = !!this._pending['tdp'];
+                this._observeTdp(this._settle('tdp', props.TdpLimit), !ours);
+            }
         } else if (iface === GPU_IFACE) {
             if ('AvailableGpuPerformanceLevels' in props)
                 this.gpuLevels = props.AvailableGpuPerformanceLevels;
@@ -238,39 +259,114 @@ export const SteamOSManagerClient = GObject.registerClass({
     }
 
     _refreshGpuClock() {
+        this._readProperty(GPU_IFACE, 'ManualGpuClock', clock => {
+            const settled = this._settle('gpuClock', clock);
+            if (settled === this.gpuClock)
+                return;
+
+            this.gpuClock = settled;
+            this.emit('changed');
+        });
+    }
+
+    _readProperty(iface, name, onValue) {
         this._connection.call(
             BUS_NAME, OBJECT_PATH, PROPS_IFACE, 'Get',
-            new GLib.Variant('(ss)', [GPU_IFACE, 'ManualGpuClock']),
+            new GLib.Variant('(ss)', [iface, name]),
             new GLib.VariantType('(v)'),
             Gio.DBusCallFlags.NONE, -1, this._cancellable,
             (connection, res) => {
-                let clock;
+                let value;
                 try {
-                    clock = connection.call_finish(res).recursiveUnpack()[0];
+                    value = connection.call_finish(res).recursiveUnpack()[0];
                 } catch (e) {
-                    this._logError('Reading ManualGpuClock failed', e);
+                    this._logError(`Reading ${iface}.${name} failed`, e);
                     return;
                 }
 
-                const settled = this._settle('gpuClock', clock);
-                if (settled === this.gpuClock)
-                    return;
-
-                this.gpuClock = settled;
-                this.emit('changed');
+                onValue(value);
             });
     }
 
-    setProfile(profile) {
+    setProfile(profile, onDone) {
         this._setProperty(PROFILE_IFACE, 'PerformanceProfile',
-            new GLib.Variant('s', profile));
+            new GLib.Variant('s', profile), undefined, onDone);
+    }
+
+    _observeTdp(watts, external = false) {
+        this.tdp = watts;
+
+        if (!this.tdpEnabled) {
+            if (external && watts < this.tdpMax)
+                this._storeTdpEnabled(true);
+            else
+                return;
+        }
+
+        if (watts > 0 && watts < this.tdpMax)
+            this._rememberTdp(watts);
+    }
+
+    _restoreTdp() {
+        if (this._tdpRestored || !this.canSetTdp)
+            return;
+
+        this._tdpRestored = true;
+        if (!this.tdpEnabled)
+            return;
+
+        const watts = this.tdpTarget;
+        if (watts !== this.tdp)
+            this.setTdp(watts);
+    }
+
+    _storeTdpEnabled(enabled) {
+        this.tdpEnabled = enabled;
+        this._settings.set_boolean('tdp-enabled', enabled);
+    }
+
+    _rememberTdp(watts) {
+        if (watts === this._rememberedTdp)
+            return;
+
+        this._rememberedTdp = watts;
+        this._settings.set_uint('tdp-limit', watts);
+    }
+
+    setTdpEnabled(enabled) {
+        if (enabled === this.tdpEnabled)
+            return;
+
+        if (enabled) {
+            const target = this.tdpTarget;
+            this._storeTdpEnabled(true);
+            this.setTdp(target);
+        } else {
+            if (this.tdp > 0)
+                this._rememberTdp(this.tdp);
+            this._storeTdpEnabled(false);
+            this.setTdp(this.tdpMax);
+        }
     }
 
     setTdp(watts) {
+        this._writeTdp(watts, true);
+    }
+
+    _writeTdp(watts, mayRetry) {
         this.tdp = watts;
-        this._expect('tdp', watts, value => (this.tdp = value));
+        if (this.tdpEnabled)
+            this._rememberTdp(watts);
+        this._expect('tdp', TDP_IFACE, 'TdpLimit', watts, (value, refused) => {
+            if (refused && mayRetry && this.hasProfiles && this.profile) {
+                this.setProfile(this.profile,
+                    () => this._writeTdp(watts, false));
+                return;
+            }
+            this._observeTdp(value);
+        });
         this._setProperty(TDP_IFACE, 'TdpLimit',
-            new GLib.Variant('u', watts));
+            new GLib.Variant('u', watts), 'tdp');
         this.emit('changed');
     }
 
@@ -281,7 +377,7 @@ export const SteamOSManagerClient = GObject.registerClass({
             previous !== GPU_LEVEL_MANUAL ? this.gpuClockTarget : 0;
 
         this.gpuLevel = level;
-        this._expect('gpuLevel', level, value => {
+        this._expect('gpuLevel', GPU_IFACE, 'GpuPerformanceLevel', level, value => {
             const stale = this.gpuLevel;
             this.gpuLevel = value;
             this._updateGpuClockKnown(stale);
@@ -289,7 +385,7 @@ export const SteamOSManagerClient = GObject.registerClass({
         });
         this._updateGpuClockKnown(previous);
         this._setProperty(GPU_IFACE, 'GpuPerformanceLevel',
-            new GLib.Variant('s', level));
+            new GLib.Variant('s', level), 'gpuLevel');
         this.emit('changed');
     }
 
@@ -307,16 +403,18 @@ export const SteamOSManagerClient = GObject.registerClass({
         this.gpuClock = megahertz;
         this._rememberedGpuClock = megahertz;
         this._gpuClockKnown = true;
-        this._expect('gpuClock', megahertz, value => (this.gpuClock = value));
+        this._expect('gpuClock', GPU_IFACE, 'ManualGpuClock', megahertz,
+            value => (this.gpuClock = value));
         this._setProperty(GPU_IFACE, 'ManualGpuClock',
-            new GLib.Variant('u', megahertz));
+            new GLib.Variant('u', megahertz), 'gpuClock');
         this.emit('changed');
     }
 
-    // Record a value we just wrote. Until the daemon reports it back
-    _expect(key, value, apply) {
+    _expect(key, iface, name, value, apply) {
         this._cancelPending(key);
         this._pending[key] = {
+            iface,
+            name,
             value,
             apply,
             reported: undefined,
@@ -343,8 +441,14 @@ export const SteamOSManagerClient = GObject.registerClass({
         const pending = this._pending[key];
         this._pending[key] = null;
 
-        if (pending?.reported !== undefined)
-            pending.apply(pending.reported);
+        if (pending?.reported !== undefined) {
+            this._readProperty(pending.iface, pending.name, value => {
+                if (value === pending.value)
+                    return;
+                pending.apply(value, true);
+                this.emit('changed');
+            });
+        }
 
         this.emit('changed');
         return GLib.SOURCE_REMOVE;
@@ -365,7 +469,7 @@ export const SteamOSManagerClient = GObject.registerClass({
         this._pending = {};
     }
 
-    _setProperty(iface, name, value) {
+    _setProperty(iface, name, value, key, onDone) {
         this._connection.call(
             BUS_NAME, OBJECT_PATH, PROPS_IFACE, 'Set',
             new GLib.Variant('(ssv)', [iface, name, value]),
@@ -375,8 +479,26 @@ export const SteamOSManagerClient = GObject.registerClass({
                     connection.call_finish(res);
                 } catch (e) {
                     this._logError(`Setting ${iface}.${name} failed`, e);
+                    if (!e.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
+                        this._revertPending(key, iface, name);
+                    return;
                 }
+
+                onDone?.();
             });
+    }
+
+    // A write that never landed shouldn't keep the value it asked for on screen
+    _revertPending(key, iface, name) {
+        const pending = key !== undefined ? this._pending[key] : null;
+        if (!pending)
+            return;
+
+        this._cancelPending(key);
+        this._readProperty(iface, name, value => {
+            pending.apply(value, false);
+            this.emit('changed');
+        });
     }
 
     _logError(message, error) {

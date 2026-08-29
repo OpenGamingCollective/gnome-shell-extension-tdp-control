@@ -89,6 +89,14 @@ class ProfileSubMenuItem extends PopupMenu.PopupSubMenuMenuItem {
     }
 });
 
+const InlineSwitchMenuItem = GObject.registerClass(
+class InlineSwitchMenuItem extends PopupMenu.PopupSwitchMenuItem {
+    activate(_event) {
+        if (this.mapped)
+            this.toggle();
+    }
+});
+
 const ValueSliderItem = GObject.registerClass({
     Signals: {
         'value-set': {param_types: [GObject.TYPE_INT]},
@@ -251,6 +259,7 @@ class TdpToggle extends QuickMenuToggle {
         this._client = client;
         this._profileItems = new Map();
         this._lastProfile = null;
+        this._syncingTdpSwitch = false;
         this._syncingGpuSwitch = false;
 
         this.menu.setHeader(FALLBACK_ICON, _('Power'));
@@ -266,6 +275,14 @@ class TdpToggle extends QuickMenuToggle {
         this._tdpSeparator = new PopupMenu.PopupSeparatorMenuItem();
         this.menu.addMenuItem(this._tdpSeparator);
 
+        this._tdpSwitch = new InlineSwitchMenuItem(_('Manual TDP Limit'), false);
+        this.menu.addMenuItem(this._tdpSwitch);
+        this._tdpSwitch.connect('toggled', (item, state) => {
+            if (this._syncingTdpSwitch)
+                return;
+            this._client.setTdpEnabled(state);
+        });
+
         this._tdpItem = new ValueSliderItem(_('TDP Limit'), TDP_STEP_W,
             // Translators: %d is a wattage, IE "15 W"
             watts => _('%d W').format(watts));
@@ -276,7 +293,7 @@ class TdpToggle extends QuickMenuToggle {
         this._gpuSeparator = new PopupMenu.PopupSeparatorMenuItem();
         this.menu.addMenuItem(this._gpuSeparator);
 
-        this._gpuSwitch = new PopupMenu.PopupSwitchMenuItem(
+        this._gpuSwitch = new InlineSwitchMenuItem(
             _('Manual GPU Clock'), false);
         this.menu.addMenuItem(this._gpuSwitch);
         this._gpuSwitch.connect('toggled', (item, state) => {
@@ -348,10 +365,11 @@ class TdpToggle extends QuickMenuToggle {
 
     _sync() {
         const client = this._client;
+        const showTdp = client.canSetTdp;
         const showGpu = client.canSetGpuClock;
 
         this.visible = client.available &&
-            (client.hasProfiles || client.hasTdp || showGpu);
+            (client.hasProfiles || showTdp || showGpu);
         if (!this.visible)
             return;
 
@@ -376,16 +394,23 @@ class TdpToggle extends QuickMenuToggle {
             this._collapseProfiles();
         }
 
-        this._tdpItem.visible = client.hasTdp;
-        this._tdpSeparator.visible = client.hasProfiles && client.hasTdp;
+        this._tdpSwitch.visible = showTdp;
+        this._tdpItem.visible = showTdp && client.tdpEnabled;
+        this._tdpSeparator.visible = showTdp && client.hasProfiles;
 
-        if (client.hasTdp)
-            this._tdpItem.sync(client.tdp, client.tdpMin, client.tdpMax);
+        if (showTdp) {
+            this._syncingTdpSwitch = true;
+            this._tdpSwitch.setToggleState(client.tdpEnabled);
+            this._syncingTdpSwitch = false;
+
+            if (client.tdpEnabled)
+                this._tdpItem.sync(client.tdp, client.tdpMin, client.tdpMax);
+        }
 
         this._gpuSwitch.visible = showGpu;
         this._gpuItem.visible = showGpu && client.gpuManual;
         this._gpuSeparator.visible = showGpu &&
-            (client.hasProfiles || client.hasTdp);
+            (client.hasProfiles || showTdp);
 
         if (showGpu) {
             this._syncingGpuSwitch = true;
@@ -398,14 +423,15 @@ class TdpToggle extends QuickMenuToggle {
             }
         }
 
-        const watts = _('%d W').format(client.hasTdp ? this._tdpItem.value : 0);
+        const limited = showTdp && client.tdpEnabled;
+        const watts = _('%d W').format(limited ? this._tdpItem.value : 0);
         const megahertz = _('%d MHz').format(showGpu ? this._gpuItem.value : 0);
 
         if (client.hasProfiles) {
             const {name, iconName} = profileParams(client.profile);
             this.set({
                 title: _('Power Profile'),
-                subtitle: client.hasTdp ? `${name} · ${watts}` : name,
+                subtitle: limited ? `${name} · ${watts}` : name,
                 iconName,
             });
             this.menu.setHeader(iconName, _('Power Profile'));
@@ -413,14 +439,14 @@ class TdpToggle extends QuickMenuToggle {
             this.checked = client.profile !== client.suggestedProfile;
             if (this.checked)
                 this._lastProfile = client.profile;
-        } else if (client.hasTdp) {
+        } else if (showTdp) {
             this.set({
                 title: _('TDP'),
-                subtitle: watts,
+                subtitle: limited ? watts : _('Automatic'),
                 iconName: FALLBACK_ICON,
             });
             this.menu.setHeader(FALLBACK_ICON, _('TDP'));
-            this.checked = false;
+            this.checked = client.tdpEnabled;
         } else {
             this.set({
                 title: _('GPU Clock'),
@@ -464,7 +490,7 @@ class TdpIndicator extends SystemIndicator {
 
 export default class TdpControlExtension extends Extension {
     enable() {
-        this._client = new SteamOSManagerClient();
+        this._client = new SteamOSManagerClient(this.getSettings());
         this._indicator = new TdpIndicator(this._client);
         Main.panel.statusArea.quickSettings.addExternalIndicator(this._indicator);
     }
