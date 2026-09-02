@@ -78,7 +78,9 @@ export const SteamOSManagerClient = GObject.registerClass({
         this.gpuClockMin = 0;
         this.gpuClockMax = 0;
         this._gpuClockKnown = false;
-        this._rememberedGpuClock = 0;
+        this.gpuManualWanted = this._settings.get_boolean('gpu-manual');
+        this._rememberedGpuClock = this._settings.get_uint('gpu-clock');
+        this._gpuRestored = false;
         this._gpuClockToProgram = 0;
     }
 
@@ -103,14 +105,19 @@ export const SteamOSManagerClient = GObject.registerClass({
         return this.gpuLevel === GPU_LEVEL_MANUAL;
     }
 
-    get gpuClockTarget() {
-        if (this._gpuClockKnown)
-            return this.gpuClock;
+    // The clock to restore when manual GPU control is switched back on
+    get storedGpuClock() {
         if (this._rememberedGpuClock > 0) {
             return Math.clamp(this._rememberedGpuClock,
                 this.gpuClockMin, this.gpuClockMax);
         }
         return this.gpuClockMax;
+    }
+
+    get gpuClockTarget() {
+        if (this._gpuClockKnown)
+            return this.gpuClock;
+        return this.storedGpuClock;
     }
 
     _onNameAppeared() {
@@ -184,8 +191,10 @@ export const SteamOSManagerClient = GObject.registerClass({
                 }
                 if (interfaces.includes(PROFILE_IFACE))
                     this.hasProfiles = false;
-                if (interfaces.includes(GPU_IFACE))
+                if (interfaces.includes(GPU_IFACE)) {
                     this.hasGpu = false;
+                    this._gpuRestored = false;
+                }
                 this.emit('changed');
             }));
     }
@@ -209,6 +218,7 @@ export const SteamOSManagerClient = GObject.registerClass({
         if (GPU_IFACE in interfaces) {
             this.hasGpu = true;
             this._applyProperties(GPU_IFACE, interfaces[GPU_IFACE]);
+            this._restoreGpu();
         }
     }
 
@@ -238,10 +248,13 @@ export const SteamOSManagerClient = GObject.registerClass({
                 this.gpuLevel = this._settle('gpuLevel',
                     props.GpuPerformanceLevel);
                 this._updateGpuClockKnown(previous);
+                this._observeGpuLevel();
                 this._programGpuClock();
             }
-            if ('ManualGpuClock' in props)
+            if ('ManualGpuClock' in props) {
                 this.gpuClock = this._settle('gpuClock', props.ManualGpuClock);
+                this._observeGpuClock();
+            }
             if ('ManualGpuClockMin' in props)
                 this.gpuClockMin = props.ManualGpuClockMin;
             if ('ManualGpuClockMax' in props)
@@ -249,6 +262,7 @@ export const SteamOSManagerClient = GObject.registerClass({
         }
     }
 
+    // The reported clock only means anything while the level is manual
     _updateGpuClockKnown(previousLevel) {
         if (this.gpuLevel !== GPU_LEVEL_MANUAL)
             this._gpuClockKnown = false;
@@ -258,6 +272,7 @@ export const SteamOSManagerClient = GObject.registerClass({
             this._gpuClockKnown = false;
     }
 
+    // Switching levels swaps in a different clock, so ask for the new one
     _refreshGpuClock() {
         this._readProperty(GPU_IFACE, 'ManualGpuClock', clock => {
             const settled = this._settle('gpuClock', clock);
@@ -265,6 +280,7 @@ export const SteamOSManagerClient = GObject.registerClass({
                 return;
 
             this.gpuClock = settled;
+            this._observeGpuClock();
             this.emit('changed');
         });
     }
@@ -293,6 +309,7 @@ export const SteamOSManagerClient = GObject.registerClass({
             new GLib.Variant('s', profile), undefined, onDone);
     }
 
+    // A limit that lands from elsewhere still says the user wants one
     _observeTdp(watts, external = false) {
         this.tdp = watts;
 
@@ -307,6 +324,7 @@ export const SteamOSManagerClient = GObject.registerClass({
             this._rememberTdp(watts);
     }
 
+    // The daemon comes up at its own limit, so put ours back once it's ready
     _restoreTdp() {
         if (this._tdpRestored || !this.canSetTdp)
             return;
@@ -370,8 +388,58 @@ export const SteamOSManagerClient = GObject.registerClass({
         this.emit('changed');
     }
 
+    _observeGpuLevel() {
+        if (this._gpuRestored)
+            this._storeGpuManual(this.gpuManual);
+    }
+
+    _observeGpuClock() {
+        if (this._gpuRestored && this.gpuManual && this.gpuClock > 0)
+            this._rememberGpuClock(this.gpuClock);
+    }
+
+    // The daemon comes up at its own limit, so put ours back once it's ready
+    _restoreGpu() {
+        if (this._gpuRestored || !this.canSetGpuClock)
+            return;
+
+        this._gpuRestored = true;
+        if (!this.gpuManualWanted) {
+            this._observeGpuLevel();
+            this._observeGpuClock();
+            return;
+        }
+
+        if (!this.gpuManual) {
+            this.setGpuLevel(GPU_LEVEL_MANUAL);
+            return;
+        }
+
+        const megahertz = this.storedGpuClock;
+        if (megahertz !== this.gpuClock)
+            this.setGpuClock(megahertz);
+    }
+
+    _storeGpuManual(manual) {
+        if (manual === this.gpuManualWanted)
+            return;
+
+        this.gpuManualWanted = manual;
+        this._settings.set_boolean('gpu-manual', manual);
+    }
+
+    _rememberGpuClock(megahertz) {
+        if (megahertz === this._rememberedGpuClock)
+            return;
+
+        this._rememberedGpuClock = megahertz;
+        this._settings.set_uint('gpu-clock', megahertz);
+    }
+
     setGpuLevel(level) {
         const previous = this.gpuLevel;
+
+        this._storeGpuManual(level === GPU_LEVEL_MANUAL);
 
         this._gpuClockToProgram = level === GPU_LEVEL_MANUAL &&
             previous !== GPU_LEVEL_MANUAL ? this.gpuClockTarget : 0;
@@ -381,6 +449,7 @@ export const SteamOSManagerClient = GObject.registerClass({
             const stale = this.gpuLevel;
             this.gpuLevel = value;
             this._updateGpuClockKnown(stale);
+            this._observeGpuLevel();
             this._programGpuClock();
         });
         this._updateGpuClockKnown(previous);
@@ -389,6 +458,7 @@ export const SteamOSManagerClient = GObject.registerClass({
         this.emit('changed');
     }
 
+    // A clock only sticks once the level has actually turned manual
     _programGpuClock() {
         const clock = this._gpuClockToProgram;
         if (clock === 0)
@@ -401,10 +471,12 @@ export const SteamOSManagerClient = GObject.registerClass({
 
     setGpuClock(megahertz) {
         this.gpuClock = megahertz;
-        this._rememberedGpuClock = megahertz;
+        this._rememberGpuClock(megahertz);
         this._gpuClockKnown = true;
-        this._expect('gpuClock', GPU_IFACE, 'ManualGpuClock', megahertz,
-            value => (this.gpuClock = value));
+        this._expect('gpuClock', GPU_IFACE, 'ManualGpuClock', megahertz, value => {
+            this.gpuClock = value;
+            this._observeGpuClock();
+        });
         this._setProperty(GPU_IFACE, 'ManualGpuClock',
             new GLib.Variant('u', megahertz), 'gpuClock');
         this.emit('changed');
@@ -423,6 +495,7 @@ export const SteamOSManagerClient = GObject.registerClass({
         };
     }
 
+    // Keep showing the value we asked for until the daemon reports it back
     _settle(key, reported) {
         const pending = this._pending[key];
         if (!pending)
@@ -437,6 +510,7 @@ export const SteamOSManagerClient = GObject.registerClass({
         return reported;
     }
 
+    // Out of patience: believe whatever the daemon says the value is
     _onPendingTimeout(key) {
         const pending = this._pending[key];
         this._pending[key] = null;

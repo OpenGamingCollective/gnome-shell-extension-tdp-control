@@ -91,6 +91,7 @@ class ProfileSubMenuItem extends PopupMenu.PopupSubMenuMenuItem {
 
 const InlineSwitchMenuItem = GObject.registerClass(
 class InlineSwitchMenuItem extends PopupMenu.PopupSwitchMenuItem {
+    // Flipping the switch shouldn't close the menu
     activate(_event) {
         if (this.mapped)
             this.toggle();
@@ -156,6 +157,7 @@ const ValueSliderItem = GObject.registerClass({
         return super.vfunc_key_press_event(event);
     }
 
+    // Screen readers want the slider itself, not the item wrapped around it
     reparentAccessible(menu) {
         const accessible = this._slider.get_accessible();
         accessible.set_parent(menu.box.get_accessible());
@@ -166,6 +168,7 @@ const ValueSliderItem = GObject.registerClass({
         return this._value;
     }
 
+    // A value from the daemon shouldn't move the slider out from under a drag
     sync(value, min, max) {
         this._min = min;
         this._max = max;
@@ -193,6 +196,7 @@ const ValueSliderItem = GObject.registerClass({
         this._queueApply();
     }
 
+    // Rate limit a drag so it doesn't flood the bus with writes
     _queueApply() {
         if (this._applyId !== 0)
             return;
@@ -340,6 +344,7 @@ class TdpToggle extends QuickMenuToggle {
         this._profileItem.menu.close(BoxPointer.PopupAnimation.NONE);
     }
 
+    // Safe profile if last one can't be applied
     _alternateProfile(exclude) {
         const {profiles} = this._client;
         if (profiles.includes('performance') && exclude !== 'performance')

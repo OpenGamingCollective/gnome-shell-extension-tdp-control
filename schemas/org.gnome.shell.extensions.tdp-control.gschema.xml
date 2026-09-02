@@ -16,5 +16,20 @@
         The limit to restore when manual TDP is switched on. Zero is always the maximum.
       </description>
     </key>
+    <key name="gpu-manual" type="b">
+      <default>false</default>
+      <summary>Manual GPU clock</summary>
+      <description>
+        Whether the manual GPU clock is enabled.
+      </description>
+    </key>
+    <key name="gpu-clock" type="u">
+      <default>0</default>
+      <summary>GPU clock in megahertz</summary>
+      <description>
+        The clock to restore when the manual GPU clock is switched on. Zero is
+        always the maximum.
+      </description>
+    </key>
   </schema>
 </schemalist>
