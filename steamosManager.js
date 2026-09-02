@@ -71,7 +71,9 @@ export const SteamOSManagerClient = GObject.registerClass({
         this.tdpMax = 0;
         this.tdpEnabled = this._settings.get_boolean('tdp-enabled');
         this._rememberedTdp = this._settings.get_uint('tdp-limit');
+        this._rememberedProfile = this._settings.get_string('tdp-profile');
         this._tdpRestored = false;
+        this._profileRestored = false;
         this.gpuLevels = [];
         this.gpuLevel = null;
         this.gpuClock = 0;
@@ -189,8 +191,10 @@ export const SteamOSManagerClient = GObject.registerClass({
                     this.hasTdp = false;
                     this._tdpRestored = false;
                 }
-                if (interfaces.includes(PROFILE_IFACE))
+                if (interfaces.includes(PROFILE_IFACE)) {
                     this.hasProfiles = false;
+                    this._profileRestored = false;
+                }
                 if (interfaces.includes(GPU_IFACE)) {
                     this.hasGpu = false;
                     this._gpuRestored = false;
@@ -220,6 +224,11 @@ export const SteamOSManagerClient = GObject.registerClass({
             this._applyProperties(GPU_IFACE, interfaces[GPU_IFACE]);
             this._restoreGpu();
         }
+
+        // Whether the limit needs a different profile is only clear once the
+        // whole batch has landed
+        if (PROFILE_IFACE in interfaces)
+            this._restoreProfile();
     }
 
     _applyProperties(iface, props) {
@@ -320,6 +329,8 @@ export const SteamOSManagerClient = GObject.registerClass({
                 return;
         }
 
+        this._rememberProfile();
+
         if (watts > 0 && watts < this.tdpMax)
             this._rememberTdp(watts);
     }
@@ -338,6 +349,25 @@ export const SteamOSManagerClient = GObject.registerClass({
             this.setTdp(watts);
     }
 
+    // Some hardware only exports the limit under certain profiles, so the one
+    // it was set under has to come back before the limit can
+    _restoreProfile() {
+        if (this._profileRestored || !this.hasProfiles)
+            return;
+
+        this._profileRestored = true;
+        if (!this.tdpEnabled || this.canSetTdp)
+            return;
+
+        const profile = this._rememberedProfile;
+        if (!profile || profile === this.profile)
+            return;
+        if (!this.profiles.includes(profile))
+            return;
+
+        this.setProfile(profile);
+    }
+
     _storeTdpEnabled(enabled) {
         this.tdpEnabled = enabled;
         this._settings.set_boolean('tdp-enabled', enabled);
@@ -349,6 +379,17 @@ export const SteamOSManagerClient = GObject.registerClass({
 
         this._rememberedTdp = watts;
         this._settings.set_uint('tdp-limit', watts);
+    }
+
+    // Only a profile we've actually seen a limit under is worth restoring
+    _rememberProfile() {
+        if (!this.canSetTdp || !this.profile)
+            return;
+        if (this.profile === this._rememberedProfile)
+            return;
+
+        this._rememberedProfile = this.profile;
+        this._settings.set_string('tdp-profile', this.profile);
     }
 
     setTdpEnabled(enabled) {
@@ -373,8 +414,10 @@ export const SteamOSManagerClient = GObject.registerClass({
 
     _writeTdp(watts, mayRetry) {
         this.tdp = watts;
-        if (this.tdpEnabled)
+        if (this.tdpEnabled) {
             this._rememberTdp(watts);
+            this._rememberProfile();
+        }
         this._expect('tdp', TDP_IFACE, 'TdpLimit', watts, (value, refused) => {
             if (refused && mayRetry && this.hasProfiles && this.profile) {
                 this.setProfile(this.profile,

@@ -31,5 +31,15 @@
         always the maximum.
       </description>
     </key>
+    <key name="tdp-profile" type="s">
+      <default>''</default>
+      <summary>Performance profile that allows a manual TDP limit</summary>
+      <description>
+        The profile the manual TDP limit was last set under. Some hardware only
+        offers a TDP limit under certain profiles, so this one is restored first
+        when the limit is switched on and the current profile hides it. Empty
+        means no profile is restored.
+      </description>
+    </key>
   </schema>
 </schemalist>
